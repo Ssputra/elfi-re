@@ -359,23 +359,23 @@ def format_find_flag(report: FindFlagReport, file_path: str) -> str:
             for line in tf.disasm_lines:
                 parts.append(f"    {line}")
 
-        # Ready-to-use Python template
-        parts.append("\n  === Template Skrip Python Siap Pakai ===")
-        parts.append("  ```python")
-        parts.append("  # Auto-generated template dari --trace-check")
+        # Ready-to-use Python template (no leading indentation so it's directly copy-pasteable)
+        parts.append("\n=== Template Skrip Python Siap Pakai ===")
+        parts.append("```python")
+        parts.append("# Auto-generated template dari --trace-check")
         for idx, buf in enumerate(report.ciphertext_candidates[:4]):
             arr = ", ".join(f"0x{b:02X}" for b in buf.data)
-            parts.append(f"  target_{idx} = bytes([{arr}])  # {buf.section} @ 0x{buf.address:x}")
+            parts.append(f"target_{idx} = bytes([{arr}])  # {buf.section} @ 0x{buf.address:x}")
         imms_py = ", ".join(f"0x{x:x}" for x in report.imm_constants[:16])
-        parts.append(f"  imms = [{imms_py}]")
+        parts.append(f"imms = [{imms_py}]")
         parts.append("")
-        parts.append("  def invert(data: bytes) -> bytes:")
-        parts.append("      # TODO: Implementasikan kebalikan operasi di atas")
-        parts.append("      return data")
+        parts.append("def invert(data: bytes) -> bytes:")
+        parts.append("    # TODO: Implementasikan kebalikan operasi dari disassembly di atas")
+        parts.append("    return data")
         parts.append("")
         if report.ciphertext_candidates:
-            parts.append("  print(invert(target_0))")
-        parts.append("  ```")
+            parts.append("print(invert(target_0))")
+        parts.append("```")
 
     return "\n".join(parts)
 
