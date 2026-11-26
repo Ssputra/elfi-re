@@ -10,7 +10,14 @@ from contextlib import redirect_stdout
 from pathlib import Path
 
 from elf_inspector.cli import main
-from elf_inspector.crypto import rc4_decrypt, xor_single_byte
+from elf_inspector.crypto import (
+    decode_base58,
+    rc4_decrypt,
+    rol_bytes,
+    ror_bytes,
+    xor_repeating_key,
+    xor_single_byte,
+)
 
 
 def build_rich_x86_64_elf() -> bytes:
@@ -281,8 +288,75 @@ class TestElfInspectorCLI(unittest.TestCase):
         self.assertIn("RC4-like Loop Bound", cs_out)
         self.assertIn("crypto_func", cs_out)
 
-        # Also verify single-byte XOR helper
+        # Also verify single-byte XOR & bit-rotation helpers
         self.assertEqual(xor_single_byte(xor_single_byte(b"CTF{abc}", 0x5A), 0x5A), b"CTF{abc}")
+        self.assertEqual(ror_bytes(rol_bytes(b"CTF{rot}", 3), 3), b"CTF{rot}")
+        self.assertIsNotNone(decode_base58("2NEpo7TZRRrLZSi2U"))
+
+    def test_find_flag_universal_encodings_crib_and_trace(self) -> None:
+        import base64
+
+        # Base64 flag in .rodata + crib-dragged repeating XOR in .secret + --trace-check
+        b64_flag = base64.b64encode(b"FLAG{base64_decoded_ok}")
+        crib_plain = b"FLAG{crib_drag_works}"
+        crib_enc = xor_repeating_key(crib_plain, b"K3y!")
+
+        # .text: lea rdi, [rip + disp] -> points to .secret, cmp al, 0x42, ret
+        text_data = b"\x48\x8d\x3d\xf9\x1f\x00\x00\x3c\x42\xc3"
+        rodata_data = b64_flag + b"\x00plain_secret_token_no_braces\x00"
+        secret_data = crib_enc
+
+        shstrtab = b"\x00.text\x00.rodata\x00.secret\x00.symtab\x00.strtab\x00.shstrtab\x00"
+        strtab = b"\x00check_flag\x00"
+        text_vaddr = 0x401000
+        rodata_vaddr = 0x402000
+        secret_vaddr = 0x403000
+
+        symtab_data = (
+            struct.pack("<IBBHQQ", 0, 0, 0, 0, 0, 0)
+            + struct.pack("<IBBHQQ", 1, 0x12, 0, 1, text_vaddr, len(text_data))
+        )
+
+        ehdr_size = 64
+        text_off = ehdr_size
+        rodata_off = text_off + len(text_data)
+        secret_off = rodata_off + len(rodata_data)
+        symtab_off = secret_off + len(secret_data)
+        strtab_off = symtab_off + len(symtab_data)
+        shstrtab_off = strtab_off + len(strtab)
+        shdr_off = shstrtab_off + len(shstrtab)
+
+        e_ident = b"\x7fELF" + bytes([2, 1, 1, 0]) + b"\x00" * 8
+        ehdr = struct.pack(
+            "<16sHHIQQQIHHHHHH",
+            e_ident, 2, 62, 1, text_vaddr, 0, shdr_off, 0, ehdr_size, 56, 0, 64, 7, 6,
+        )
+
+        def shdr(name_b: bytes, stype: int, flags: int, addr: int, off: int, sz: int, link: int = 0, info: int = 0, esz: int = 0) -> bytes:
+            return struct.pack("<IIQQQQIIQQ", shstrtab.index(name_b), stype, flags, addr, off, sz, link, info, 1, esz)
+
+        elf_bytes = (
+            ehdr + text_data + rodata_data + secret_data + symtab_data + strtab + shstrtab
+            + struct.pack("<IIQQQQIIQQ", 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+            + shdr(b".text", 1, 0x6, text_vaddr, text_off, len(text_data))
+            + shdr(b".rodata", 1, 0x2, rodata_vaddr, rodata_off, len(rodata_data))
+            + shdr(b".secret", 1, 0x2, secret_vaddr, secret_off, len(secret_data))
+            + shdr(b".symtab", 2, 0, 0, symtab_off, len(symtab_data), link=5, info=1, esz=24)
+            + shdr(b".strtab", 3, 0, 0, strtab_off, len(strtab))
+            + shdr(b".shstrtab", 3, 0, 0, shstrtab_off, len(shstrtab))
+        )
+
+        uni_elf = self.tmp_path / "universal.elf"
+        uni_elf.write_bytes(elf_bytes)
+
+        rc, out = _run_capture(
+            ["find-flag", str(uni_elf), "--prefix", "FLAG{", "--printable-only", "--trace-check"]
+        )
+        self.assertEqual(rc, 0)
+        self.assertIn("FLAG{base64_decoded_ok}", out)
+        self.assertIn("FLAG{crib_drag_works}", out)
+        self.assertIn("plain_secret_token_no_braces", out)
+        self.assertIn("Template Skrip Python Siap Pakai", out)
 
     def test_invalid_elf_handling(self) -> None:
         self.assertEqual(main(["info", str(self.invalid_path)]), 1)

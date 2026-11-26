@@ -263,19 +263,23 @@ def format_triage(report: TriageReport, file_path: str) -> str:
 
 
 def format_find_flag(report: FindFlagReport, file_path: str) -> str:
-    """Format find-flag static crypto analysis and auto-decryption results."""
+    """Format universal find-flag analysis, auto-decryption results, and --trace-check template."""
     parts = [
-        f"=== Find-Flag Analysis: {file_path} ===",
-        f"  Regex Pattern: {report.pattern}",
+        f"=== Universal Find-Flag Analysis: {file_path} ===",
+        f"  Regex Pattern : {report.pattern}",
+        f"  Printable Mode: {'Aktif (>90% ASCII)' if report.printable_only else 'Nonaktif'}",
     ]
+    if report.prefix:
+        parts.append(f"  Known Prefix  : {report.prefix}")
 
-    # 1. Direct pattern matches
+    # 1. Direct pattern / printable heuristic matches
     if report.direct_matches:
-        headers = ["Section", "VirtAddr", "Status", "XREF", "Value"]
+        headers = ["Section", "VirtAddr", "Kind", "Status", "XREF", "Value"]
         rows = [
             [
                 m.section,
                 f"0x{m.address:016x}",
+                m.match_kind,
                 "POTENSI DECOY (.rodata)" if m.is_potential_decoy else "KHUSUS / NON-RODATA",
                 ", ".join(m.xref_functions) if m.xref_functions else "-",
                 m.value,
@@ -289,7 +293,7 @@ def format_find_flag(report: FindFlagReport, file_path: str) -> str:
     else:
         parts.append("\n[1] Pencarian Pola Flag Langsung (0 ditemukan)")
 
-    # 2. Ciphertext & Key candidates
+    # 2. Ciphertext & Target Buffer candidates
     if report.ciphertext_candidates:
         c_headers = ["Section", "VirtAddr", "Size", "Entropy", "Reason"]
         c_rows = [
@@ -303,20 +307,25 @@ def format_find_flag(report: FindFlagReport, file_path: str) -> str:
             for c in report.ciphertext_candidates
         ]
         parts.append(
-            f"\n[2] Kandidat Ciphertext ({len(report.ciphertext_candidates)} ditemukan)\n"
+            f"\n[2] Target Buffer & Kandidat Ciphertext ({len(report.ciphertext_candidates)} ditemukan)\n"
             + _format_table(c_headers, c_rows)
         )
     else:
-        parts.append("\n[2] Kandidat Ciphertext (0 ditemukan)")
+        parts.append("\n[2] Target Buffer & Kandidat Ciphertext (0 ditemukan)")
 
-    keys_preview = ", ".join(report.key_candidates[:15]) if report.key_candidates else "(tidak ada)"
-    if len(report.key_candidates) > 15:
-        keys_preview += f" ... (+{len(report.key_candidates) - 15} lainnya)"
-    parts.append(f"\n[3] Kandidat Kunci ASCII ({len(report.key_candidates)}): {keys_preview}")
+    keys_preview = ", ".join(report.key_candidates[:12]) if report.key_candidates else "(tidak ada)"
+    if len(report.key_candidates) > 12:
+        keys_preview += f" ... (+{len(report.key_candidates) - 12} lainnya)"
+    imms_preview = ", ".join(f"0x{x:x}" for x in report.imm_constants[:12]) if report.imm_constants else "(tidak ada)"
+    if len(report.imm_constants) > 12:
+        imms_preview += f" ... (+{len(report.imm_constants) - 12} lainnya)"
+    parts.append(f"\n[3] Kandidat Kunci & Konstanta")
+    parts.append(f"  ASCII Keys ({len(report.key_candidates)}): {keys_preview}")
+    parts.append(f"  Scalar Imms ({len(report.imm_constants)}): {imms_preview}")
 
-    # 3. Auto-decryption results
+    # 4. Auto-decryption results
     if report.decrypted_flags:
-        d_headers = ["Algorithm", "Key", "Source", "VirtAddr", "Plaintext"]
+        d_headers = ["Algorithm", "Key / Param", "Source", "VirtAddr", "Plaintext"]
         d_rows = [
             [
                 d.algorithm,
@@ -328,11 +337,39 @@ def format_find_flag(report: FindFlagReport, file_path: str) -> str:
             for d in report.decrypted_flags
         ]
         parts.append(
-            f"\n[4] Hasil Auto-Decryptor ({len(report.decrypted_flags)} cocok pola flag!)\n"
+            f"\n[4] Hasil Auto-Decoder Berlapis ({len(report.decrypted_flags)} ditemukan!)\n"
             + _format_table(d_headers, d_rows)
         )
     else:
-        parts.append("\n[4] Hasil Auto-Decryptor (tidak ada kandidat dekripsi yang cocok pola)")
+        parts.append("\n[4] Hasil Auto-Decoder Berlapis (tidak ada kandidat yang cocok)")
+
+    # 5. Verification logic trace & Python solver template
+    if report.trace_functions:
+        parts.append(f"\n[5] Ringkasan Logika Verifikasi (--trace-check, {len(report.trace_functions)} fungsi)")
+        for tf in report.trace_functions:
+            parts.append(f"\n  --- Fungsi: {tf.name} (0x{tf.start_address:016x}) ---")
+            parts.append(f"  Calls : {', '.join(tf.called_targets) if tf.called_targets else '-'}")
+            parts.append(f"  Imms  : {', '.join(f'0x{x:x}' for x in tf.scalar_imms) if tf.scalar_imms else '-'}")
+            for line in tf.disasm_lines:
+                parts.append(f"    {line}")
+
+        # Ready-to-use Python template
+        parts.append("\n  === Template Skrip Python Siap Pakai ===")
+        parts.append("  ```python")
+        parts.append("  # Auto-generated template dari --trace-check")
+        for idx, buf in enumerate(report.ciphertext_candidates[:4]):
+            arr = ", ".join(f"0x{b:02X}" for b in buf.data)
+            parts.append(f"  target_{idx} = bytes([{arr}])  # {buf.section} @ 0x{buf.address:x}")
+        imms_py = ", ".join(f"0x{x:x}" for x in report.imm_constants[:16])
+        parts.append(f"  imms = [{imms_py}]")
+        parts.append("")
+        parts.append("  def invert(data: bytes) -> bytes:")
+        parts.append("      # TODO: Implementasikan kebalikan operasi di atas")
+        parts.append("      return data")
+        parts.append("")
+        if report.ciphertext_candidates:
+            parts.append("  print(invert(target_0))")
+        parts.append("  ```")
 
     return "\n".join(parts)
 

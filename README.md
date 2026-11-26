@@ -76,10 +76,12 @@ Ganti `<file_elf>` dengan path atau nama file biner ELF target Anda (misalnya `c
 elfi triage <file_elf>
 ```
 
-### 2. Pencarian & Auto-Dekripsi Flag (`find-flag`)
+### 2. Pencarian & Auto-Dekripsi Flag Universal (`find-flag`)
 ```bash
 elfi find-flag <file_elf>
 elfi find-flag <file_elf> --pattern "CTF\{[^}]+\}"
+elfi find-flag <file_elf> --prefix "CTF{" --printable-only
+elfi find-flag <file_elf> --trace-check
 ```
 
 ### 3. Pemindaian Konstanta Kriptografi (`crypto-scan`)

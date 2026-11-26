@@ -236,13 +236,27 @@ def build_parser() -> argparse.ArgumentParser:
     # 8. find-flag
     p_ff = subparsers.add_parser(
         "find-flag",
-        help="Otomatisasi pencarian pola flag, ekstraksi kunci/ciphertext, & auto-decryptor (XOR, RC4, ROT).",
+        help="Pencarian & auto-dekripsi flag universal (Base64/32/58, Hex, ROT, XOR, RC4, --trace-check).",
     )
     p_ff.add_argument("file", help="Path ke file biner ELF.")
     p_ff.add_argument(
         "--pattern",
         default=DEFAULT_FLAG_PATTERN,
         help=f"Regex format flag (default: {DEFAULT_FLAG_PATTERN}).",
+    )
+    p_ff.add_argument(
+        "--printable-only",
+        action="store_true",
+        help="Aktifkan mode heuristik string ASCII printable (>90%%) tanpa harus memakai {}.",
+    )
+    p_ff.add_argument(
+        "--prefix",
+        help="Prefix flag yang diketahui untuk crib-dragging Repeating XOR (misal: 'CTF{').",
+    )
+    p_ff.add_argument(
+        "--trace-check",
+        action="store_true",
+        help="Tampilkan disassembly fungsi verifikasi & template skrip Python siap pakai.",
     )
 
     # 9. crypto-scan
@@ -351,7 +365,13 @@ def _handle_command(args: argparse.Namespace) -> str:
             return format_triage(report, args.file)
 
         if args.command == "find-flag":
-            report = run_find_flag(elf, pattern_str=args.pattern)
+            report = run_find_flag(
+                elf,
+                pattern_str=args.pattern,
+                printable_only=args.printable_only,
+                prefix=args.prefix,
+                trace_check=args.trace_check,
+            )
             return format_find_flag(report, args.file)
 
         if args.command == "crypto-scan":
