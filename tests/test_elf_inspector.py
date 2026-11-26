@@ -277,7 +277,7 @@ class TestElfInspectorCLI(unittest.TestCase):
 
         rc, ff_out = _run_capture(["find-flag", str(crypto_elf), "--pattern", r"CTF\{[^}]+\}"])
         self.assertEqual(rc, 0)
-        self.assertIn("POTENSI DECOY (.rodata)", ff_out)
+        self.assertIn("POTENSI DECOY", ff_out)
         self.assertIn("RC4 (KSA+PRGA)", ff_out)
         self.assertIn("CTF{real_rc4_flag}", ff_out)
 

@@ -280,7 +280,13 @@ def format_find_flag(report: FindFlagReport, file_path: str) -> str:
                 m.section,
                 f"0x{m.address:016x}",
                 m.match_kind,
-                "POTENSI DECOY (.rodata)" if m.is_potential_decoy else "KHUSUS / NON-RODATA",
+                (
+                    "POTENSI DECOY (tanpa XREF)"
+                    if not m.xref_functions
+                    else "POTENSI DECOY (plaintext)"
+                    if m.is_potential_decoy
+                    else "KHUSUS"
+                ),
                 ", ".join(m.xref_functions) if m.xref_functions else "-",
                 m.value,
             ]

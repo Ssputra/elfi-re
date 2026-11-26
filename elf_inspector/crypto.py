@@ -217,25 +217,57 @@ def _analyze_text_structure(
     except CsError:
         return {}, [], [], []
 
-    for insn in insns:
-        fn = _find_containing_function(insn.address, func_ranges) or "unknown"
-        func_insns.setdefault(fn, []).append(insn)
+    # If binary is stripped (no .symtab FUNC symbols), segment .text at ret/int3 boundaries
+    if not func_ranges and insns:
+        seg_start = 0
+        for idx, insn in enumerate(insns):
+            if insn.mnemonic in ("ret", "retn", "hlt") or (
+                idx + 1 < len(insns) and insns[idx + 1].mnemonic == "endbr64"
+            ):
+                end_idx = idx + 1
+                seg_insns = insns[seg_start:end_idx]
+                if seg_insns:
+                    func_insns[f"sub_{seg_insns[0].address:x}"] = seg_insns
+                seg_start = end_idx
+        if seg_start < len(insns):
+            seg_insns = insns[seg_start:]
+            func_insns[f"sub_{seg_insns[0].address:x}"] = seg_insns
 
+        # Rebuild xrefs using inferred sub_<addr> names
+        xrefs.clear()
+        for sub_name, sub_list in func_insns.items():
+            for insn in sub_list:
+                for op in getattr(insn, "operands", ()):
+                    target = None
+                    if op.type == X86_OP_MEM and op.mem.base == X86_REG_RIP:
+                        target = insn.address + insn.size + op.mem.disp
+                    elif op.type == X86_OP_IMM and op.imm > 0x1000:
+                        target = op.imm
+                    if target is not None:
+                        lst = xrefs.setdefault(target, [])
+                        if sub_name not in lst:
+                            lst.append(sub_name)
+    else:
+        for insn in insns:
+            fn = _find_containing_function(insn.address, func_ranges) or f"sub_{insn.address:x}"
+            func_insns.setdefault(fn, []).append(insn)
+
+            for op in getattr(insn, "operands", ()):
+                target = None
+                if op.type == X86_OP_MEM and op.mem.base == X86_REG_RIP:
+                    target = insn.address + insn.size + op.mem.disp
+                elif op.type == X86_OP_IMM and op.imm > 0x1000:
+                    target = op.imm
+                if target is not None:
+                    lst = xrefs.setdefault(target, [])
+                    if fn not in lst:
+                        lst.append(fn)
+
+    for insn in insns:
         if insn.mnemonic in ("mov", "xor", "add", "sub", "rol", "ror", "cmp"):
             for op in getattr(insn, "operands", ()):
                 if op.type == X86_OP_IMM and 0 < op.imm <= 0xFFFFFFFF:
                     imms_set.add(int(op.imm))
-
-        for op in getattr(insn, "operands", ()):
-            target: int | None = None
-            if op.type == X86_OP_MEM and op.mem.base == X86_REG_RIP:
-                target = insn.address + insn.size + op.mem.disp
-            elif op.type == X86_OP_IMM and op.imm > 0x1000:
-                target = op.imm
-            if target is not None:
-                lst = xrefs.setdefault(target, [])
-                if fn not in lst:
-                    lst.append(fn)
 
     # Identify functions calling memcmp/strncmp/strcmp/puts or having cmp/xor byte loops
     trace_functions: list[TraceFunctionInfo] = []
@@ -541,26 +573,29 @@ def run_find_flag(
     for item in all_strings:
         m = compiled_re.search(item.value)
         if m:
+            item_xrefs = xrefs.get(item.address, [])
+            is_decoy = item.section in (".rodata", ".data") or not item_xrefs
             direct_matches.append(
                 FlagMatch(
                     section=item.section,
                     address=item.address,
                     value=m.group(0),
-                    is_potential_decoy=(item.section == ".rodata"),
-                    xref_functions=xrefs.get(item.address, []),
+                    is_potential_decoy=is_decoy,
+                    xref_functions=item_xrefs,
                     match_kind="regex",
                 )
             )
         elif printable_only and len(item.value) >= 8 and item.section not in (".strtab", ".shstrtab", ".dynstr"):
             raw_b = item.value.encode("utf-8", errors="ignore")
             if _printable_ratio(raw_b) >= 0.90:
+                item_xrefs = xrefs.get(item.address, [])
                 direct_matches.append(
                     FlagMatch(
                         section=item.section,
                         address=item.address,
                         value=item.value,
-                        is_potential_decoy=(item.section == ".rodata"),
-                        xref_functions=xrefs.get(item.address, []),
+                        is_potential_decoy=item.section in (".rodata", ".data") or not item_xrefs,
+                        xref_functions=item_xrefs,
                         match_kind="printable-heuristic",
                     )
                 )
