@@ -250,6 +250,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Aktifkan mode heuristik string ASCII printable (>90%%) tanpa harus memakai {}.",
     )
     p_ff.add_argument(
+        "--strict",
+        action="store_true",
+        help="Sembunyikan string plaintext statis dari .rodata/.data; hanya tampilkan hasil komputasi/dekripsi.",
+    )
+    p_ff.add_argument(
         "--prefix",
         help="Prefix flag yang diketahui untuk crib-dragging Repeating XOR (misal: 'CTF{').",
     )
@@ -369,6 +374,7 @@ def _handle_command(args: argparse.Namespace) -> str:
                 elf,
                 pattern_str=args.pattern,
                 printable_only=args.printable_only,
+                strict=args.strict,
                 prefix=args.prefix,
                 trace_check=args.trace_check,
             )

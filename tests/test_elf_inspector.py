@@ -277,9 +277,20 @@ class TestElfInspectorCLI(unittest.TestCase):
 
         rc, ff_out = _run_capture(["find-flag", str(crypto_elf), "--pattern", r"CTF\{[^}]+\}"])
         self.assertEqual(rc, 0)
-        self.assertIn("POTENSI DECOY", ff_out)
+        self.assertIn("[LIKELY DECOY - UNREFERENCED]", ff_out)
+        self.assertIn("[MEDIUM]", ff_out)
         self.assertIn("RC4 (KSA+PRGA)", ff_out)
         self.assertIn("CTF{real_rc4_flag}", ff_out)
+        # Decoy should be ranked AFTER the RC4-decrypted flag
+        self.assertLess(ff_out.index("CTF{real_rc4_flag}"), ff_out.index("CTF{decoy_flag}"))
+
+        # --strict should hide the static .rodata decoy while keeping the RC4 result
+        rc, strict_out = _run_capture(
+            ["find-flag", str(crypto_elf), "--pattern", r"CTF\{[^}]+\}", "--strict"]
+        )
+        self.assertEqual(rc, 0)
+        self.assertIn("CTF{real_rc4_flag}", strict_out)
+        self.assertNotIn("CTF{decoy_flag}", strict_out)
 
         rc, cs_out = _run_capture(["crypto-scan", str(crypto_elf)])
         self.assertEqual(rc, 0)

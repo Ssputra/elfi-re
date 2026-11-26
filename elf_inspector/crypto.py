@@ -44,6 +44,10 @@ KNOWN_CRYPTO_AND_MAGIC_CONSTANTS: dict[int, str] = {
 
 AES_SBOX_PREFIX = bytes([0x63, 0x7C, 0x77, 0x7B, 0xF2, 0x6B, 0x6F, 0xC5])
 COMPARE_SYMBOLS = ("memcmp", "strncmp", "strcmp", "puts")
+STRICT_COMPARE_SYMBOLS = ("memcmp", "strncmp", "strcmp")
+OUTPUT_SYMBOLS = ("puts", "printf", "write", "fprintf")
+DECOY_KEYWORDS = ("fake", "false", "decoy", "wrong", "reject", "r3j3ct", "dummy", "bait")
+SUCCESS_KEYWORDS = ("correct", "success", "valid", "unlocked", "granted", "win")
 
 
 @dataclass(frozen=True)
@@ -93,12 +97,28 @@ class TraceFunctionInfo:
 
 
 @dataclass(frozen=True)
+class ScoredFlagCandidate:
+    """Unified ranked flag candidate with anti-decoy classification and verification score."""
+
+    tier: str
+    score: int
+    label: str
+    source: str
+    method: str
+    xref_info: str
+    value: str
+    is_static_plaintext: bool
+
+
+@dataclass(frozen=True)
 class FindFlagReport:
     """Complete output of the universal find-flag pipeline."""
 
     pattern: str
     printable_only: bool
+    strict: bool
     prefix: str | None
+    ranked_candidates: list[ScoredFlagCandidate]
     direct_matches: list[FlagMatch]
     ciphertext_candidates: list[CiphertextCandidate]
     key_candidates: list[str]
@@ -191,15 +211,23 @@ def _read_vaddr_bytes(elf: ELFFile, vaddr: int, max_len: int = 64) -> tuple[str,
 
 def _analyze_text_structure(
     elf: ELFFile,
-) -> tuple[dict[int, list[str]], list[int], list[CiphertextCandidate], list[TraceFunctionInfo]]:
-    """Inspect .text for XREFs, scalar immediates, target buffers, and comparison functions."""
+) -> tuple[
+    dict[int, list[str]],
+    list[int],
+    list[CiphertextCandidate],
+    list[TraceFunctionInfo],
+    set[int],
+    set[int],
+    set[int],
+]:
+    """Inspect .text for XREFs, scalar immediates, target buffers, comparison & output functions."""
     info = get_elf_info(elf)
     if not info.is_x86_64:
-        return {}, [], [], []
+        return {}, [], [], [], set(), set(), set()
 
     text_sec = elf.get_section_by_name(".text")
     if text_sec is None or text_sec["sh_type"] == "SHT_NOBITS":
-        return {}, [], [], []
+        return {}, [], [], [], set(), set(), set()
 
     func_ranges = _build_function_ranges(elf)
     call_map = _build_call_target_map(elf)
@@ -208,6 +236,9 @@ def _analyze_text_structure(
     target_buffers: list[CiphertextCandidate] = []
     seen_buf_addrs: set[int] = set()
     func_insns: dict[str, list] = {}
+    memcmp_targets: set[int] = set()
+    success_branch_targets: set[int] = set()
+    output_only_addrs: set[int] = set()
 
     try:
         md = Cs(CS_ARCH_X86, CS_MODE_64)
@@ -215,7 +246,7 @@ def _analyze_text_structure(
         md.detail = True
         insns = list(md.disasm(text_sec.data(), int(text_sec["sh_addr"])))
     except CsError:
-        return {}, [], [], []
+        return {}, [], [], [], set(), set(), set()
 
     # If binary is stripped (no .symtab FUNC symbols), segment .text at ret/int3 boundaries
     if not func_ranges and insns:
@@ -312,7 +343,22 @@ def _analyze_text_structure(
                                     )
                                 )
 
+        calls_strict_compare = any(any(cs in c for cs in STRICT_COMPARE_SYMBOLS) for c in called)
         calls_compare = any(any(cs in c for cs in COMPARE_SYMBOLS) for c in called)
+        calls_output_only = any(any(osym in c for osym in OUTPUT_SYMBOLS) for c in called) and not calls_strict_compare and not has_cmp_loop
+        has_success_ref = any(
+            any(sk in raw.decode("utf-8", errors="ignore").lower() for sk in SUCCESS_KEYWORDS)
+            for _, _, raw in fn_refs
+        )
+
+        for taddr, _, _ in fn_refs:
+            if calls_strict_compare or has_cmp_loop:
+                memcmp_targets.add(taddr)
+                if has_success_ref:
+                    success_branch_targets.add(taddr)
+            elif calls_output_only:
+                output_only_addrs.add(taddr)
+
         if calls_compare or (has_cmp_loop and fn_refs):
             disasm_lines = [
                 f"0x{i.address:016x}: {i.mnemonic:<7} {i.op_str}".rstrip()
@@ -329,7 +375,15 @@ def _analyze_text_structure(
                 )
             )
 
-    return xrefs, sorted(imms_set), target_buffers, trace_functions
+    return (
+        xrefs,
+        sorted(imms_set),
+        target_buffers,
+        trace_functions,
+        memcmp_targets,
+        success_branch_targets,
+        output_only_addrs,
+    )
 
 
 # --- Primitive Decoders & Decryptors ---
@@ -557,16 +611,25 @@ def run_find_flag(
     elf: ELFFile,
     pattern_str: str = DEFAULT_FLAG_PATTERN,
     printable_only: bool = False,
+    strict: bool = False,
     prefix: str | None = None,
     trace_check: bool = False,
 ) -> FindFlagReport:
-    """Run universal static flag finder, layered auto-decoder, and optional trace-check."""
+    """Run universal static flag finder, anti-decoy scoring, and layered auto-decoder."""
     try:
         compiled_re = re.compile(pattern_str)
     except re.error as exc:
         raise InvalidELFError(f"Regex --pattern tidak valid: {exc}") from exc
 
-    xrefs, imm_constants, text_target_bufs, trace_functions = _analyze_text_structure(elf)
+    (
+        xrefs,
+        imm_constants,
+        text_target_bufs,
+        trace_functions,
+        memcmp_targets,
+        success_branch_targets,
+        output_only_addrs,
+    ) = _analyze_text_structure(elf)
     all_strings = extract_all_section_strings(elf, min_length=4)
 
     direct_matches: list[FlagMatch] = []
@@ -700,10 +763,100 @@ def run_find_flag(
             if pt_rc4:
                 record("RC4 (KSA+PRGA)", f'"{key_str}"', cand.section, cand.address, pt_rc4)
 
+    # Score & rank all candidates (never early-exit on .rodata decoy!)
+    ranked_candidates: list[ScoredFlagCandidate] = []
+
+    for dec in decrypted_flags:
+        addr = dec.source_address
+        if addr in success_branch_targets:
+            tier = "HIGH"
+            score = 110
+            label = "[VERIFIED - CRYPTO/LOGIC OUTPUT]"
+            xref_info = "memcmp/cmp -> success branch"
+        elif addr in memcmp_targets:
+            tier = "HIGH"
+            score = 100
+            label = "[VERIFIED - CRYPTO/LOGIC OUTPUT]"
+            xref_info = "memcmp/cmp target"
+        elif not is_standard_section(dec.source_section):
+            tier = "MEDIUM"
+            score = 75
+            label = "[DECODED - NON-STANDARD SECTION]"
+            xref_info = ", ".join(xrefs.get(addr, [])) or "-"
+        else:
+            tier = "MEDIUM"
+            score = 60
+            label = "[DECODED - ENCODING/CIPHER]"
+            xref_info = ", ".join(xrefs.get(addr, [])) or "-"
+
+        ranked_candidates.append(
+            ScoredFlagCandidate(
+                tier=tier,
+                score=score,
+                label=label,
+                source=f"{dec.source_section} @ 0x{addr:x}",
+                method=f"{dec.algorithm} (key={dec.key_repr})",
+                xref_info=xref_info,
+                value=dec.plaintext,
+                is_static_plaintext=False,
+            )
+        )
+
+    for m in direct_matches:
+        val_lower = m.value.lower()
+        has_decoy_kw = any(kw in val_lower for kw in DECOY_KEYWORDS)
+        is_rodata_or_data = m.section in (".rodata", ".data")
+        is_unreferenced = not m.xref_functions
+        is_output_only = m.address in output_only_addrs
+
+        if not is_rodata_or_data and m.address in memcmp_targets:
+            tier = "HIGH"
+            score = 95
+            label = "[VERIFIED - CUSTOM SECTION + CMP]"
+        elif not is_rodata_or_data and not is_unreferenced:
+            tier = "MEDIUM"
+            score = 65
+            label = "[CANDIDATE - CUSTOM SECTION]"
+        elif is_unreferenced:
+            tier = "LOW / DECOY"
+            score = 1 if has_decoy_kw else 5
+            label = "[LIKELY DECOY - UNREFERENCED]"
+        elif has_decoy_kw or is_output_only:
+            tier = "LOW / DECOY"
+            score = 2
+            label = "[CANDIDATE - STATIC PLAINTEXT / POSSIBLE DECOY]"
+        else:
+            tier = "LOW / DECOY"
+            score = 15
+            label = "[CANDIDATE - STATIC PLAINTEXT / POSSIBLE DECOY]"
+
+        if strict and is_rodata_or_data:
+            continue
+
+        ranked_candidates.append(
+            ScoredFlagCandidate(
+                tier=tier,
+                score=score,
+                label=label,
+                source=f"{m.section} @ 0x{m.address:x}",
+                method=f"Static Plaintext ({m.match_kind})",
+                xref_info=", ".join(m.xref_functions) if m.xref_functions else "-",
+                value=m.value,
+                is_static_plaintext=is_rodata_or_data,
+            )
+        )
+
+    ranked_candidates.sort(key=lambda c: (-c.score, c.value))
+
+    if strict:
+        direct_matches = [m for m in direct_matches if m.section not in (".rodata", ".data")]
+
     return FindFlagReport(
         pattern=pattern_str,
         printable_only=printable_only,
+        strict=strict,
         prefix=prefix,
+        ranked_candidates=ranked_candidates,
         direct_matches=direct_matches,
         ciphertext_candidates=ciphertext_candidates,
         key_candidates=key_candidates,

@@ -80,6 +80,7 @@ elfi triage <file_elf>
 ```bash
 elfi find-flag <file_elf>
 elfi find-flag <file_elf> --pattern "CTF\{[^}]+\}"
+elfi find-flag <file_elf> --strict
 elfi find-flag <file_elf> --prefix "CTF{" --printable-only
 elfi find-flag <file_elf> --trace-check
 ```

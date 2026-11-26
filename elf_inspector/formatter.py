@@ -263,41 +263,36 @@ def format_triage(report: TriageReport, file_path: str) -> str:
 
 
 def format_find_flag(report: FindFlagReport, file_path: str) -> str:
-    """Format universal find-flag analysis, auto-decryption results, and --trace-check template."""
+    """Format universal find-flag analysis, anti-decoy scoring, and --trace-check template."""
     parts = [
         f"=== Universal Find-Flag Analysis: {file_path} ===",
         f"  Regex Pattern : {report.pattern}",
         f"  Printable Mode: {'Aktif (>90% ASCII)' if report.printable_only else 'Nonaktif'}",
+        f"  Strict Mode   : {'Aktif (abaikan plaintext statis .rodata/.data)' if report.strict else 'Nonaktif'}",
     ]
     if report.prefix:
         parts.append(f"  Known Prefix  : {report.prefix}")
 
-    # 1. Direct pattern / printable heuristic matches
-    if report.direct_matches:
-        headers = ["Section", "VirtAddr", "Kind", "Status", "XREF", "Value"]
-        rows = [
+    # 1. Ranked candidates by Anti-Decoy & Verification Scoring
+    if report.ranked_candidates:
+        r_headers = ["Tier", "Label", "Source", "Method", "XREF", "Flag Candidate"]
+        r_rows = [
             [
-                m.section,
-                f"0x{m.address:016x}",
-                m.match_kind,
-                (
-                    "POTENSI DECOY (tanpa XREF)"
-                    if not m.xref_functions
-                    else "POTENSI DECOY (plaintext)"
-                    if m.is_potential_decoy
-                    else "KHUSUS"
-                ),
-                ", ".join(m.xref_functions) if m.xref_functions else "-",
-                m.value,
+                f"[{c.tier}]",
+                c.label,
+                c.source,
+                c.method,
+                c.xref_info,
+                c.value,
             ]
-            for m in report.direct_matches
+            for c in report.ranked_candidates
         ]
         parts.append(
-            f"\n[1] Pencarian Pola Flag Langsung ({len(report.direct_matches)} ditemukan)\n"
-            + _format_table(headers, rows)
+            f"\n[1] Kandidat Flag Terurut (Anti-Decoy & Verification Scoring, {len(report.ranked_candidates)} kandidat)\n"
+            + _format_table(r_headers, r_rows)
         )
     else:
-        parts.append("\n[1] Pencarian Pola Flag Langsung (0 ditemukan)")
+        parts.append("\n[1] Kandidat Flag Terurut (0 kandidat ditemukan)")
 
     # 2. Ciphertext & Target Buffer candidates
     if report.ciphertext_candidates:
