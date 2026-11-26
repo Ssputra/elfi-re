@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "elf-inspector"
+version = "1.0.0"
+description = "Aplikasi CLI berbasis Python untuk analisis statis file biner ELF x86_64."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "pyelftools>=0.31",
+    "capstone>=5.0.1",
+]
+
+[project.scripts]
+elfi = "elf_inspector.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["elf_inspector*"]
